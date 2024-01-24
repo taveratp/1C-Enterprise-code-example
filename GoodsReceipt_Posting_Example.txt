@@ -1,0 +1,196 @@
+
+Procedure BeforeWrite(Cancel, WriteMode, PostingMode)
+	Common.CalculateDocument(ThisObject);
+EndProcedure
+
+Procedure Posting(Cancel, Mode)
+	
+	ArrayItem = ThisObject.ItemsLines.UnloadColumn("Item");
+	Query = New Query;
+	Query.Text =  "SELECT
+	              |	SUM(ISNULL(ItemsBalance.QuantityBalance, 0)) AS Quantity,
+	              |	SUM(ISNULL(ItemsBalance.AmountBalance, 0)) AS Amount,
+	              |	ItemsBalance.GoodsReceipt AS GoodsReceipt,
+	              |	ItemsBalance.Item AS Item,
+	              |	ItemsBalance.GoodsReceipt.Date AS GoodsReceiptDate
+	              |FROM
+	              |	AccumulationRegister.Items.Balance(&BalanceDate, Item IN (&ArrayItem)) AS ItemsBalance
+	              |
+	              |GROUP BY
+	              |	ItemsBalance.GoodsReceipt,
+	              |	ItemsBalance.Item,
+	              |	ItemsBalance.GoodsReceipt.Date";
+
+	Query.SetParameter("BalanceDate", New Boundary(Date, BoundaryType.Including)); 
+	Query.SetParameter("ArrayItem", ArrayItem);
+	
+	BalanceLeft = Query.Execute().Unload();
+	
+	ValueTable_Issue = New ValueTable;
+	ValueTable_Issue.Columns.Add("Item");
+	ValueTable_Issue.Columns.Add("GoodsReceipt");
+	ValueTable_Issue.Columns.Add("Quantity");
+	ValueTable_Issue.Columns.Add("Amount");
+	
+	ValueTable_Items = ThisObject.ItemsLines.Unload();
+	ValueTable_Items.GroupBy("Item","Quantity, Amount");
+	For Each ItemRow In ValueTable_Items Do
+		
+		Filter_Item = New Structure;
+		Filter_Item.Insert("Item",ItemRow.Item);
+		
+		// balance value table on items sorted by receipt date
+		FoundedBalance = BalanceLeft.Copy(Filter_Item);
+		FoundedBalance.Sort("GoodsReceiptDate");
+		
+		If  FoundedBalance.Count() = 0 Then
+			Mes = ErrorInfo();
+    		Message("Balance on " + String(ItemRow.Item) + " not found" + Mes.Description);    
+			
+			Cancel = True;
+		Else
+			
+			InitialAmount = ItemRow.Quantity;    		
+			
+			For Each BalanceRow In FoundedBalance Do
+				If BalanceRow.Quantity = 0 Then
+					Continue;
+				EndIf;
+				If BalanceRow.Quantity >= InitialAmount Then
+					NewRecord = ValueTable_Issue.Add();
+					FillPropertyValues(NewRecord, BalanceRow);
+					NewRecord.Quantity   = InitialAmount;
+					NewRecord.Amount     = Round(BalanceRow.Amount/BalanceRow.Quantity*NewRecord.Quantity,3);
+					BalanceRow.Quantity  = BalanceRow.Quantity - InitialAmount;
+					BalanceRow.Amount    = BalanceRow.Amount - NewRecord.Amount;
+					InitialAmount = 0;						
+					Break;
+				ElsIf BalanceRow.Quantity > 0 Then
+					NewRecord = ValueTable_Issue.Add(); 
+					FillPropertyValues(NewRecord, BalanceRow);
+					NewRecord.Quantity   = BalanceRow.Quantity;
+					NewRecord.Amount     = BalanceRow.Amount;
+					InitialAmount = InitialAmount - BalanceRow.Quantity; 					
+					BalanceRow.Quantity = 0;  						
+				EndIf;
+			EndDo;
+
+			Если InitialAmount > 0 Тогда
+				Mes = ErrorInfo();
+				Message("Not enough quantity on the balance on " + String(ItemRow.Item) + ": " + String(InitialAmount) + Mes.Description); 
+				Cancel = True;
+			КонецЕсли;
+									
+		EndIf;
+		
+	EndDo;	
+	
+	If Cancel Then
+		Return;
+	EndIf;
+	
+	RegisterRecords.Items.Write = True;
+	For Each CurRowItemsLines In ValueTable_Issue Do
+		Record = RegisterRecords.Items.Add();
+		Record.RecordType = AccumulationRecordType.Expense;
+		Record.Period = Date;
+		FillPropertyValues(Record, CurRowItemsLines);
+	EndDo;
+	
+	// an average write-off
+	Query.Text =  "SELECT
+	              |	SUM(ISNULL(BookkeepingBalance.QuantityBalance, 0)) AS Quantity,
+	              |	SUM(ISNULL(BookkeepingBalance.AmountBalance, 0)) AS Amount,
+	              |	BookkeepingBalance.ExtDimension1 AS Item
+	              |FROM
+	              |	AccountingRegister.Bookkeeping.Balance(&BalanceDate, Account = &AccountItems, , ExtDimension1 IN (&ArrayItem)) AS BookkeepingBalance
+	              |
+	              |GROUP BY
+	              |	BookkeepingBalance.ExtDimension1";
+
+	Query.SetParameter("AccountItems", ChartsOfAccounts.Bookkeeping.FindByCode("001"));
+	BalanceLeft = Query.Execute().Unload();
+	
+	ValueTable_Issue = New ValueTable;
+	ValueTable_Issue.Columns.Add("Item");
+	ValueTable_Issue.Columns.Add("Quantity");
+	ValueTable_Issue.Columns.Add("Amount");
+	ValueTable_Issue.Columns.Add("AmountSales");
+	
+	ValueTable_Items = ThisObject.ItemsLines.Unload();
+	ValueTable_Items.GroupBy("Item","Quantity, Amount");
+	
+	For Each ItemRow In ValueTable_Items Do
+		
+		Filter_Item = New Structure;
+		Filter_Item.Insert("Item",ItemRow.Item);
+		
+		FoundedBalance = BalanceLeft.Copy(Filter_Item);
+		
+		If  FoundedBalance.Count() = 0 Then
+			Mes = ErrorInfo();
+    		Message("Balance on " + String(ItemRow.Item) + " not found" + Mes.Description);     
+			Cancel = True;
+		Else
+			
+			InitialAmount = ItemRow.Quantity;    		
+			
+			For Each BalanceRow In FoundedBalance Do
+				If BalanceRow.Quantity = 0 Then
+					Continue;
+				EndIf;
+				If BalanceRow.Quantity >= InitialAmount Then
+					NewRecord = ValueTable_Issue.Add();
+					FillPropertyValues(NewRecord, BalanceRow);
+					NewRecord.Quantity   = InitialAmount;
+					NewRecord.Amount     = Round(BalanceRow.Amount/BalanceRow.Quantity*NewRecord.Quantity,3);
+					BalanceRow.Quantity  = BalanceRow.Quantity - InitialAmount;
+					BalanceRow.Amount    = BalanceRow.Amount - NewRecord.Amount;
+					NewRecord.AmountSales = ItemRow.Amount; 
+					InitialAmount = 0;						
+					Break;
+				ElsIf BalanceRow.Quantity > 0 Then
+					NewRecord = ValueTable_Issue.Add(); 
+					FillPropertyValues(NewRecord, BalanceRow);
+					NewRecord.Quantity   = BalanceRow.Quantity;
+					NewRecord.Amount     = BalanceRow.Amount;
+					InitialAmount = InitialAmount - BalanceRow.Quantity;
+					NewRecord.AmountSales = ItemRow.Amount;
+					BalanceRow.Quantity = 0;  						
+				EndIf;
+			EndDo;
+
+			Если InitialAmount > 0 Тогда
+				Mes = ErrorInfo();
+				Message("Not enough quantity on the balance on " + String(ItemRow.Item) + ": " + String(InitialAmount) + Mes.Description); 
+				Cancel = True;
+			КонецЕсли;
+									
+		EndIf;
+		
+	EndDo;	
+	
+	If Cancel Then
+		Return;
+	EndIf;
+
+	RegisterRecords.Bookkeeping.Write = True;
+	For Each CurRowItemsLines In ValueTable_Issue Do
+		Record = RegisterRecords.Bookkeeping.Add();
+		Record.AccountDr = ChartsOfAccounts.Bookkeeping.ProductionCost;
+		Record.AccountCr = ChartsOfAccounts.Bookkeeping.Items;
+		Record.Period = Date;
+		Record.QuantityCr = CurRowItemsLines.Quantity;
+		Record.Amount = CurRowItemsLines.Amount;
+		Record.ExtDimensionsCr[ChartsOfCharacteristicTypes.BookkeepingExtDimensions.Items] = CurRowItemsLines.Item;
+		// sales
+		Record = RegisterRecords.Bookkeeping.Add();
+		Record.AccountDr = ChartsOfAccounts.Bookkeeping.Settlements;
+		Record.AccountCr = ChartsOfAccounts.Bookkeeping.Sales;
+		Record.Period = Date;
+		Record.QuantityCr = CurRowItemsLines.Quantity;
+		Record.Amount = CurRowItemsLines.AmountSales;
+		Record.ExtDimensionsCr[ChartsOfCharacteristicTypes.BookkeepingExtDimensions.Items] = CurRowItemsLines.Item;
+	EndDo;
+
+EndProcedure
